@@ -277,6 +277,92 @@ calc-multi-solver/
 
 ---
 
+
+---
+
+## 11. Debugging & Logging (2026-04-29 Updates)
+
+### Log Files (`logs/<run-id>/`)
+
+| File | Contents | New Fields |
+|------|----------|-----------|
+| `llm_calls.jsonl` | All LLM calls (Planner/Builder/Evaluator) | `content` (raw response), `agent` (planner/builder/evaluator) |
+| `pipeline.jsonl` | Per-problem EvalResult summary | unchanged |
+| `traces/<id>.json` | Full step-by-step trace per problem | unchanged |
+| `llm_verbose.jsonl` | Full request+response (only if `LOG_LLM_VERBOSE=1`) | unchanged |
+
+### Query Logs by Agent
+
+```powershell
+# View only Planner responses
+Get-Content logs/<run-id>/llm_calls.jsonl | ConvertFrom-Json |
+  Where-Object {$_.agent -eq "planner"} | Select-Object content
+
+# View only Builder tool calls
+Get-Content logs/<run-id>/llm_calls.jsonl | ConvertFrom-Json |
+  Where-Object {$_.agent -eq "builder"} | ForEach-Object {
+    $_.content | ConvertFrom-Json | Select-Object action, tool, args
+  }
+
+# Count calls per agent
+Get-Content logs/<run-id>/llm_calls.jsonl | ConvertFrom-Json |
+  Group-Object agent | Select-Object Name, Count
+```
+
+### Tool Parameter Format (Builder)
+
+Builder tools now require **exact parameter names** (case-sensitive):
+
+```json
+// ? Correct
+{"action": "tool", "tool": "differentiate", "args": {"expr_str": "sin(x)", "var": "x"}}
+
+// ? Wrong - parameter name mismatch
+{"action": "tool", "tool": "differentiate", "args": {"expression": "sin(x)", "variable": "x"}}
+```
+
+**Available tools & exact params**:
+| Tool | Required Params |
+|------|----------------|
+| `parse` | `latex_or_expr`, `var?` |
+| `differentiate` | `expr_str`, `var?`, `n?` |
+| `integrate_indef` | `expr_str`, `var?` |
+| `integrate_def` | `expr_str`, `var`, `a_str`, `b_str` |
+| `limit` | `expr_str`, `var`, `point_str`, `direction?` |
+| `series` | `expr_str`, `var`, `point_str?`, `n?` |
+| `simplify` | `expr_str` |
+| `solve` | `expr_str`, `var?` |
+| `substitute` | `expr_str`, `mapping_str` |
+
+### Self-Check Logic
+
+For indefinite integrals, Builder now verifies correctness via:
+1. Differentiate answer ? compare to integrand
+2. **Symbolic simplification**: `simplify(d/dx(answer) - integrand) == 0`?
+3. **Numeric sampling**: Evaluate at 6 test points, ?80% match ? pass
+4. Fallback: Give benefit of doubt on parse errors
+
+This correctly handles identities like `cos(x) ? 1/sec(x)` that fail string comparison.
+
+### Quick Debug Workflow
+
+```powershell
+# 1. Run a minimal test
+python scripts/run_batch.py --parquet data/raw/question-v1.parquet --K 1 --max-rows 1 --run-id debug_test
+
+# 2. Check if Planner generated strategies
+Get-Content logs/debug_test/llm_calls.jsonl | ConvertFrom-Json |
+  Where-Object {$_.agent -eq "planner"} | ForEach-Object { $_.content | ConvertFrom-Json }
+
+# 3. Check Builder tool calls for parameter errors
+Get-Content logs/debug_test/llm_calls.jsonl | ConvertFrom-Json |
+  Where-Object {$_.agent -eq "builder" -and $_.content -like "*Bad arguments*"}
+
+# 4. Check final result
+Get-Content logs/debug_test/pipeline.jsonl | ConvertFrom-Json |
+  Select-Object problem_id, is_correct, confidence, chosen_strategy_id
+```
+
 ## License
 
 MIT

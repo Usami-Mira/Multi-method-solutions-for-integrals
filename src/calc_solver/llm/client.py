@@ -41,6 +41,7 @@ class QwenClient:
         temperature: float = 0.2,
         json_mode: bool = False,
         max_retries: int = 3,
+        agent_name: str = "unknown",
     ) -> str:
         kwargs: dict = {
             "model": self.model_id,
@@ -67,6 +68,20 @@ class QwenClient:
                             "completion_tokens": resp.usage.completion_tokens if resp.usage else 0,
                             "elapsed_s": round(elapsed, 2),
                             "json_mode": json_mode,
+                            "content": content,
+                            "agent": agent_name,
+                        })
+                        # Verbose logging for debugging
+                        self.logger.log_llm_verbose({
+                            "model": self.model_id,
+                            "temperature": temperature,
+                            "json_mode": json_mode,
+                            "prompt_tokens": resp.usage.prompt_tokens if resp.usage else 0,
+                            "completion_tokens": resp.usage.completion_tokens if resp.usage else 0,
+                            "elapsed_s": round(elapsed, 2),
+                            "agent": agent_name,
+                            "request": {"messages": messages},
+                            "response": {"content": content},
                         })
 
                     if json_mode:
@@ -95,3 +110,4 @@ class QwenClient:
         if m:
             return m.group(0)
         return text
+

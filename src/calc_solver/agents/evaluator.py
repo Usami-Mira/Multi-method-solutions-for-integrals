@@ -23,6 +23,33 @@ class EvaluatorAgent(BaseAgent):
         super().__init__(client, temperature=0.0, logger=logger)
         self.verifier = verifier or Verifier(llm_client=client)
 
+    async def evaluate_single(self, problem: Problem, solution: Solution) -> bool:
+        """Single candidate check: returns True if passed"""
+        pred = solution.final_answer or solution.final_answer_sympy or ""
+        if self.logger:
+            self.logger.info("evaluate_single_call",
+                problem_id=problem.problem_id,
+                strategy_id=solution.strategy_id,
+                pred=pred[:200] if pred else None,
+                gold=problem.gold_answer[:200],
+                var=problem.variable,
+                answer_type=problem.answer_type)
+        vr = self.verifier.is_equivalent(
+            pred, problem.gold_answer,
+            var=problem.variable,
+            answer_type=problem.answer_type,
+            question=problem.question
+        )
+        if self.logger:
+            self.logger.info("evaluate_single_result",
+                problem_id=problem.problem_id,
+                strategy_id=solution.strategy_id,
+                is_eq=vr.is_eq,
+                level_used=vr.level_used,
+                confidence=vr.confidence,
+                evidence=vr.evidence[:100] if vr.evidence else None)
+        return vr.is_eq
+
     async def evaluate(self, problem: Problem, solutions: list[Solution]) -> EvalResult:
         gold = problem.gold_answer
         var = problem.variable
@@ -65,7 +92,7 @@ class EvaluatorAgent(BaseAgent):
                 candidates=solutions,
             )
 
-        # All wrong — find majority (≥2 agreeing answers)
+        # All wrong - find majority (>=2 agreeing answers)
         notes = ""
         chosen_sol: Optional[Solution] = None
         for i, si in enumerate(solutions):
@@ -88,7 +115,7 @@ class EvaluatorAgent(BaseAgent):
                 method_agreement = count + 1
                 break
 
-        # Optional LLM "full review" — only writes to notes, never flips is_correct
+        # Optional LLM "full review" - only writes to notes, never flips is_correct
         if solutions and any(s.final_answer for s in solutions):
             notes = await self._llm_review(problem, solutions)
 
@@ -104,11 +131,11 @@ class EvaluatorAgent(BaseAgent):
         )
 
     async def _llm_review(self, problem: Problem, solutions: list[Solution]) -> str:
-        """Ask LLM to identify most likely correct candidate — result goes to notes only."""
+        """Ask LLM to identify most likely correct candidate - result goes to notes only."""
         candidates_str = ""
         for sol in solutions:
             if sol.final_answer:
-                candidates_str += f"[{sol.strategy_id}] 答案: {sol.final_answer}\n"
+                candidates_str += f"[{sol.strategy_id}] answer: {sol.final_answer}\n"
         if not candidates_str:
             return ""
         system = get("evaluator_review", "system")
@@ -119,7 +146,7 @@ class EvaluatorAgent(BaseAgent):
             candidates=candidates_str,
         )
         try:
-            raw = await self._call(system, user, json_mode=True, temperature=0.0)
+            raw = await self._call(system, user, json_mode=True, temperature=0.0, agent_name="evaluator")
             data = json.loads(raw)
             return f"LLM_review: best={data.get('best_id','?')} reason={data.get('reason','')}"
         except Exception as e:

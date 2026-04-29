@@ -55,10 +55,12 @@ class Verifier:
         llm_client: Optional["QwenClient"] = None,
         n_samples: int = 30,
         llm_for_unsure: bool = True,
+        logger: Optional["RunLogger"] = None,
     ):
         self.llm_client = llm_client
         self.n_samples = n_samples
         self.llm_for_unsure = llm_for_unsure
+        self.logger = logger
 
     def is_equivalent(
         self,
@@ -77,7 +79,8 @@ class Verifier:
         gold_expr = best_parse(gold, var)
 
         if pred_expr is None or gold_expr is None:
-            # Can't do symbolic checks; try L5 if available
+            if self.logger:
+                self.logger.info("verifier_parse_failed", pred=pred[:100], gold=gold[:100], var=var)
             if self.llm_client and self.llm_for_unsure:
                 return self._l5(pred, gold, var, answer_type, question, 0, 0)
             return VerifyResult(is_eq=False, level_used="fail", confidence=0.0, evidence="parse_failed")
@@ -85,41 +88,48 @@ class Verifier:
         # L2: symbolic simplification
         l2 = self._l2(pred_expr, gold_expr, answer_type)
         if l2 is not None:
+            if self.logger:
+                self.logger.info("verifier_L2", is_eq=l2, pred_expr=str(pred_expr)[:80], gold_expr=str(gold_expr)[:80])
             return VerifyResult(is_eq=l2, level_used="L2", confidence=0.95,
                                 evidence="symbolic_simplify")
 
         # L3: type-specific
         l3 = self._l3(pred_expr, gold_expr, pred, gold, var, answer_type)
         if l3 is not None:
+            if self.logger:
+                self.logger.info("verifier_L3", is_eq=l3, answer_type=answer_type)
             return VerifyResult(is_eq=l3, level_used="L3", confidence=0.95,
                                 evidence="type_specific")
 
         # L4: numerical sampling
         l4_result, pass_count, total_count = self._l4(pred_expr, gold_expr, var, answer_type)
         if l4_result is True:
+            if self.logger:
+                self.logger.info("verifier_L4", is_eq=True, pass_count=pass_count, total_count=total_count)
             return VerifyResult(is_eq=True, level_used="L4", confidence=0.9,
                                 evidence=f"numerical_{pass_count}/{total_count}")
         if l4_result is False:
+            if self.logger:
+                self.logger.info("verifier_L4", is_eq=False, pass_count=pass_count, total_count=total_count)
             return VerifyResult(is_eq=False, level_used="L4", confidence=0.9,
                                 evidence=f"numerical_{pass_count}/{total_count}")
 
-        # L4 inconclusive → maybe L5
+        # L4 inconclusive -> maybe L5
         if self.llm_client and self.llm_for_unsure and pass_count >= total_count * 0.5:
             return self._l5(pred, gold, var, answer_type, question, pass_count, total_count)
 
         return VerifyResult(is_eq=False, level_used="L4", confidence=0.5,
                             evidence=f"inconclusive_{pass_count}/{total_count}")
 
-    # ── L1 ──────────────────────────────────────────────────────────────────
     def _l1(self, pred: str, gold: str) -> bool:
         def norm(s: str) -> str:
             s = s.strip().replace(" ", "")
+            s = s.rstrip(".;:,!?")  # Remove trailing punctuation
             s = s.replace(r"\dfrac", r"\frac").replace(r"\tfrac", r"\frac")
             s = re.sub(r"[\(\)\{\}]", lambda m: {"(": "[", ")": "]", "{": "[", "}": "]"}[m.group()], s)
             return s
         return norm(pred) == norm(gold)
 
-    # ── L2 ──────────────────────────────────────────────────────────────────
     def _l2(self, pred: sp.Expr, gold: sp.Expr, answer_type: str) -> bool | None:
         """Returns True if proven equal, None if uncertain. Never returns False."""
         try:
@@ -130,7 +140,6 @@ class Verifier:
             pass
         return None
 
-    # ── L3 ──────────────────────────────────────────────────────────────────
     def _l3(self, pred: sp.Expr, gold: sp.Expr, pred_str: str, gold_str: str,
              var: str, answer_type: str) -> bool | None:
         x = sp.Symbol(var)
@@ -148,92 +157,67 @@ class Verifier:
                     return abs(pv - gv) < 1e-7
                 except Exception:
                     pass
-            elif answer_type in ("set", "interval"):
-                if pred == gold:
-                    return True
         except Exception:
             pass
         return None
 
-    # ── L4 ──────────────────────────────────────────────────────────────────
-    def _l4(self, pred: sp.Expr, gold: sp.Expr, var: str,
-             answer_type: str) -> tuple[bool | None, int, int]:
+    def _l4(self, pred: sp.Expr, gold: sp.Expr, var: str, answer_type: str,
+            n_samples: Optional[int] = None) -> tuple[bool | None, int, int]:
+        """Numerical sampling. Returns (result, pass_count, total_count)."""
+        n = n_samples or self.n_samples
         x = sp.Symbol(var)
-        rng = np.random.RandomState(42)
-        points = rng.uniform(-3, 3, self.n_samples)
-
-        # For indefinite integrals compare derivatives to cancel +C
-        if answer_type == "expression":
-            try:
-                pred_d = sp.diff(pred, x)
-                gold_d = sp.diff(gold, x)
-                pred_fn = sp.lambdify(x, pred_d, "numpy")
-                gold_fn = sp.lambdify(x, gold_d, "numpy")
-            except Exception:
-                return None, 0, 0
-        else:
-            try:
-                pred_fn = sp.lambdify(x, pred, "numpy")
-                gold_fn = sp.lambdify(x, gold, "numpy")
-            except Exception:
-                return None, 0, 0
-
         pass_count = 0
-        valid_count = 0
-        for pt in points:
+        total_count = 0
+
+        # Sample points avoiding singularities
+        test_points = list(np.linspace(-10, 10, n)) + [0.1, 0.5, 1.5, 3.14, -2.71]
+        for pt in test_points:
             try:
-                pv = complex(pred_fn(pt))
-                gv = complex(gold_fn(pt))
-                if np.isnan(pv.real) or np.isinf(pv.real) or np.isnan(gv.real) or np.isinf(gv.real):
-                    continue
-                if abs(pv.imag) > 1e-6 or abs(gv.imag) > 1e-6:
-                    continue
-                tol = max(1e-7, 1e-6 * abs(gv.real))
-                valid_count += 1
-                if abs(pv.real - gv.real) < tol:
+                pv = float(pred.subs(x, pt).evalf())
+                gv = float(gold.subs(x, pt).evalf())
+                total_count += 1
+                if np.isfinite(pv) and np.isfinite(gv) and abs(pv - gv) < 1e-6:
                     pass_count += 1
             except Exception:
                 continue
 
-        if valid_count < 10:
-            return None, pass_count, valid_count
-        if pass_count >= 28 * valid_count / 30:
-            return True, pass_count, valid_count
-        return False, pass_count, valid_count
+        if total_count == 0:
+            return None, 0, 0
+        if pass_count == total_count:
+            return True, pass_count, total_count
+        if pass_count == 0:
+            return False, pass_count, total_count
+        return None, pass_count, total_count  # Inconclusive
 
-    # ── L5 ──────────────────────────────────────────────────────────────────
     def _l5(self, pred: str, gold: str, var: str, answer_type: str,
-             question: str, pass_count: int, total: int) -> VerifyResult:
-        import asyncio
-        import json as _json
-        prompt = (
-            f"你是数学等价性裁判，只回答数学等价问题。\n"
-            f"题目背景: {question[:300]}\n"
-            f"答案类型: {answer_type}\n"
-            f"候选答案 P: {pred}\n"
-            f"标准答案 G: {gold}\n"
-            f"数值采样线索: {pass_count}/{total} 点近似相等，符号化简未能归零\n\n"
-            "只输出JSON（无Markdown）：\n"
-            '{"equivalent": true | false, "reason": "≤2句中文说明"}\n\n'
-            "判定准则：仅当P、G在所有合法定义域上恒等才为true；"
-            "含任意常数C（不定积分）时把P-G是否为常数视作等价。"
-        )
+            question: str, pass_count: int, total_count: int) -> VerifyResult:
+        """LLM arbitration for edge cases."""
+        if not self.llm_client:
+            return VerifyResult(is_eq=False, level_used="fail", confidence=0.0, evidence="no_llm_client")
         try:
-            if asyncio.get_event_loop().is_running():
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    fut = pool.submit(asyncio.run,
-                                      self.llm_client.chat([{"role": "user", "content": prompt}],
-                                                            temperature=0.0, json_mode=True))
-                    raw = fut.result(timeout=30)
-            else:
-                raw = asyncio.run(
-                    self.llm_client.chat([{"role": "user", "content": prompt}],
-                                         temperature=0.0, json_mode=True))
-            data = _json.loads(raw)
-            is_eq = bool(data.get("equivalent", False))
-            reason = data.get("reason", "")
-            return VerifyResult(is_eq=is_eq, level_used="L5", confidence=0.6, evidence=reason)
+            from calc_solver.llm.prompts import get, format_prompt
+            system = get("equivalence_judge", "system") if "system" in get("equivalence_judge") else ""
+            user = format_prompt(
+                "equivalence_judge", "user_template",
+                question=question,
+                answer_type=answer_type,
+                pred=pred,
+                gold=gold,
+                pass_rate=pass_count,
+                total=total_count,
+            )
+            raw = self.llm_client.chat(
+                [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                temperature=0.0, json_mode=True, max_retries=1
+            )
+            import json
+            data = json.loads(raw)
+            is_eq = data.get("equivalent", False)
+            reason = data.get("reason", "")[:100]
+            if self.logger:
+                self.logger.info("verifier_L5_success", is_eq=is_eq, reason=reason)
+            return VerifyResult(is_eq=is_eq, level_used="L5", confidence=0.6, evidence=f"llm_judge: {reason}")
         except Exception as e:
-            return VerifyResult(is_eq=False, level_used="fail", confidence=0.0,
-                                evidence=f"L5_error: {e}")
+            if self.logger:
+                self.logger.info("verifier_L5_error", raw_response=(raw if 'raw' in locals() else None)[:200] if 'raw' in locals() else None, error=str(e))
+            return VerifyResult(is_eq=False, level_used="fail", confidence=0.0, evidence=f"L5_error: {type(e).__name__}: {str(e)[:50]}")

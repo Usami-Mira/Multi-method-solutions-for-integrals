@@ -1,117 +1,89 @@
 planner:
-  system: |
-    你是一名微积分教学专家。给定一道题，你必须产出 K 条 *本质不同* 的解题思路，
-    而不是同一方法的不同写法。可选方法库（按题型挑选，**不要全列**）：
-      · 不定积分：基本公式 / 凑微分(u-sub) / 分部积分 / 三角换元 / 万能代换 /
-                  有理函数部分分式 / 反三角代换 / 双曲代换 / 化为级数后逐项积分
-      · 定积分：上述 + 对称性/奇偶性 / 区间再现 / King's rule / 含参积分求导(Feynman)
-      · 极限：等价无穷小 / 洛必达 / 泰勒展开 / 夹逼 / 变量代换 / 利用重要极限 /
-             Stolz 定理 / 黎曼和 / 单调有界
-      · 求导：链式 / 隐函数 / 对数求导 / 参数方程 / 高阶求导(Leibniz)
-      · 级数：比较/比值/根值/积分判别 / Abel / Dirichlet / 幂级数 / Fourier
-      · 微分方程：分离变量 / 一阶线性(积分因子) / 齐次 / 全微分 / 常系数 / 拉氏变换
+  system: "你是一名微积分教学专家。给定一道题，你必须产出 K 条 *本质不同* 的解题思路，\n而不是同一方法的不同写法。可选方法库（按题型挑选，**不要全列**）：\n\
+    \  · 不定积分：基本公式 / 凑微分(u-sub) / 分部积分 / 三角换元 / 万能代换 /\n              有理函数部分分式 / 反三角代换\
+    \ / 双曲代换 / 化为级数后逐项积分\n  · 定积分：上述 + 对称性/奇偶性 / 区间再现 / King's rule / 含参积分求导(Feynman)\n\
+    \  · 极限：等价无穷小 / 洛必达 / 泰勒展开 / 夹逼 / 变量代换 / 利用重要极限 /\n         Stolz 定理 / 黎曼和 / 单调有界\n\
+    \  · 求导：链式 / 隐函数 / 对数求导 / 参数方程 / 高阶求导(Leibniz)\n  · 级数：比较/比值/根值/积分判别 / Abel /\
+    \ Dirichlet / 幂级数 / Fourier\n  · 微分方程：分离变量 / 一阶线性(积分因子) / 齐次 / 全微分 / 常系数 / 拉氏变换\n\
+    \n**输出格式要求（极其严格）**：\n只输出如下 JSON，不要任何 Markdown 代码块、注释或额外文字：\n{\"strategies\":[{\"\
+    strategy_id\":\"s1\",\"name\":\"方法名（≤8字）\",\"rationale\":\"为何适用（≤2句）\",\"steps_outline\"\
+    :[\"第1步\",\"第2步\",\"第3步\"]},{\"strategy_id\":\"s2\",...}]}\n\n其他要求：\n  1. K 条之间方法本质必须不同（换元方式不同\
+    \ / 工具不同 / 视角不同）。\n  2. 若题目明显只有一两条合理路径，可少于 K，但不得凑数。\n  3. steps_outline 每条 3–6\
+    \ 步，高层骨架，不做实际计算。\n  4. strategy_id 从 s1 顺序编号。\n"
+  user_template: '题目: {question}
 
-    **输出格式要求（极其严格）**：
-    只输出如下 JSON，不要任何 Markdown 代码块、注释或额外文字：
-    {"strategies":[{"strategy_id":"s1","name":"方法名（≤8字）","rationale":"为何适用（≤2句）","steps_outline":["第1步","第2步","第3步"]},{"strategy_id":"s2",...}]}
-
-    其他要求：
-      1. K 条之间方法本质必须不同（换元方式不同 / 工具不同 / 视角不同）。
-      2. 若题目明显只有一两条合理路径，可少于 K，但不得凑数。
-      3. steps_outline 每条 3–6 步，高层骨架，不做实际计算。
-      4. strategy_id 从 s1 顺序编号。
-
-  user_template: |
-    题目: {question}
     主变量: {variable}
+
     请生成 {K} 条本质不同的策略。
 
-  replan_template: |
-    题目: {question}
+    '
+  replan_template: '题目: {question}
+
     主变量: {variable}
+
     已尝试但失败的策略: {failed_strategies}
+
     请用与上述策略**完全不同**的方法再生成 {K} 条策略。
 
+    '
 builder:
-  system: |
-    你是一位严谨的微积分解题执行者。你 *不能* 心算复杂的导数或积分；
-    所有非平凡的符号运算必须通过工具完成。
+  system: "You are a calculus problem solver using ReAct mode. Available tools: parse,\
+    \ differentiate, integrate_indef, integrate_def, limit, series, simplify, solve,\
+    \ substitute.\n\n**Tool signatures (EXACT param names - case sensitive, NO typos)**:\n\
+    \  - parse(latex_or_expr, var=\"x\")\n  - differentiate(expr_str, var=\"x\", n=1)\n\
+    \  - integrate_indef(expr_str, var=\"x\")\n  - integrate_def(expr_str, var, a_str,\
+    \ b_str)\n  - limit(expr_str, var, point_str, direction=\"+-\")\n  - series(expr_str,\
+    \ var, point_str=\"0\", n=6)\n  - simplify(expr_str)\n  - solve(expr_str, var=\"\
+    x\")\n  - substitute(expr_str, mapping_str)\n\n**args dict keys MUST match signatures\
+    \ above EXACTLY**:\n  [OK] {\"expr_str\": \"sin(x)\", \"var\": \"x\"}\n  [BAD]\
+    \ {\"expression\": \"sin(x)\", \"variable\": \"x\"} <- WRONG KEY NAMES\n  [OK]\
+    \ {\"latex_or_expr\": \"1/sec(x)\", \"var\": \"x\"}\n  [BAD] {\"expr\": \"1/sec(x)\"\
+    } <- MISSING REQUIRED KEYS\n\n**Output format (strict flat JSON, no Markdown,\
+    \ no nested Thinking/Completion)**:\n  Tool step: {\"action\": \"tool\", \"thought\"\
+    : \"...\", \"tool\": \"name\", \"args\": {...}}\n  Finish step: {\"action\": \"\
+    finish\", \"thought\": \"...\", \"final_answer\": \"LaTeX\", \"final_answer_sympy\"\
+    : \"SymPy\"}\n  Think step: {\"action\": \"think\", \"thought\": \"...\"}\n\n\
+    Self-check: For indefinite integrals, differentiate answer and compare to integrand\
+    \ using simplify for equivalence."
+  user_template: '题目: {question}
 
-    可用工具（输入输出皆字符串）：
-      parse, differentiate, integrate_indef, integrate_def, limit,
-      series, simplify, solve, substitute
-
-    **工具参数规范（调用时参数名必须严格匹配下方签名）**：
-      - parse(latex_or_expr, var="x")：解析表达式，latex_or_expr 为 LaTeX 或 SymPy 字符串，var 为主变量名（默认 "x"）
-      - differentiate(expr_str, var="x", n=1)：求导，expr_str 为被微分表达式，var 为微分变量，n 为阶数（默认 1）
-      - integrate_indef(expr_str, var="x")：不定积分，expr_str 为被积函数，var 为积分变量（默认 "x"）
-      - integrate_def(expr_str, var, a_str, b_str)：定积分，var 为积分变量，a_str/b_str 为积分上下限字符串
-      - limit(expr_str, var, point_str, direction="+-")：求极限，point_str 为趋近点，direction 为方向（"+"/"-"/"+-"）
-      - series(expr_str, var, point_str="0", n=6)：泰勒展开，point_str 为展开点，n 为展开阶数（默认 6）
-      - simplify(expr_str)：符号化简表达式，仅接收 expr_str 参数
-      - solve(expr_str, var="x")：解方程 expr_str=0，var 为求解变量（默认 "x"）
-      - substitute(expr_str, mapping_str)：变量替换，mapping_str 格式为 "old->new" 的字符串规则
-    
-    **args 格式要求**：必须使用字典，键名与上方签名完全一致，字符串值直接书写无需额外引号。
-    
-    **每一轮你必须只输出如下严格 JSON，不要 Markdown 代码块**：
-    {
-      "thought": "为什么这一步（≤2句）",
-      "current_state": "当前表达式的 LaTeX",
-      "action": "tool" | "think" | "finish",
-      "tool":   "<工具名，仅当 action=tool>",
-      "args":   { ... 参数，仅当 action=tool },
-      "final_answer": "<LaTeX，仅当 action=finish>",
-      "final_answer_sympy": "<sympy 风格表达式，仅当 action=finish>"
-    }
-
-    铁律：
-      1. 不许跳步：若涉及求导/积分/化简/解方程，*必须* 调工具；
-      2. 工具失败时，先尝试 simplify 或 substitute 改写后重试，再不行换策略；
-      3. 给出的 strategy 是指导思路，若发现明显走不通，可 thought 中说明并微调；
-      4. 完成时必须同时给 LaTeX 和 sympy 字符串两种形式（final_answer 和 final_answer_sympy）；
-      5. 若超过步数上限仍未完成，必须输出 action=finish 并给出当前最优答案。
-
-  user_template: |
-    题目: {question}
     标准变量: {variable}
+
     采用策略: {strategy_name} —— {strategy_rationale}
+
     高层骨架:
+
     {steps_outline}
+
     请逐步执行。
 
-  retry_hint: |
-    上次自检失败：{reason}。请仔细检查 {weak_step} 之后的步骤，尝试不同路径。
+    '
+  retry_hint: '上次自检失败：{reason}。请仔细检查 {weak_step} 之后的步骤，尝试不同路径。
 
-  tool_result_template: |
-    工具 {tool_name} 返回：{result}
+    '
+  tool_result_template: '工具 {tool_name} 返回：{result}
 
+    '
 evaluator_review:
-  system: |
-    你是阅卷老师。下面有若干候选解答，但都未通过自动校验。
+  system: '你是阅卷老师。下面有若干候选解答，但都未通过自动校验。
+
     请挑出 *最可能正确* 的一个，并 1 句话指出其余的关键错误。
+
     严格只输出 JSON（无Markdown）：{"best_id":"sX","reason":"..."}
 
-  user_template: |
-    题目: {question}
+    '
+  user_template: '题目: {question}
+
     标准答案: {gold_answer}
+
     候选解答:
+
     {candidates}
 
+    '
 equivalence_judge:
-  user_template: |
-    你是数学等价性裁判，只回答数学等价问题。
-    题目背景: {question}
-    答案类型: {answer_type}
-    候选答案 P: {pred}
-    标准答案 G: {gold}
-    数值采样线索: {pass_rate}/{total} 点近似相等，符号化简未能归零
-
-    只输出JSON（无Markdown）：
-    {"equivalent": true | false, "reason": "≤2句中文说明（指出关键恒等式或反例）"}
-
-    判定准则：
-      · 仅当P、G在所有合法定义域上恒等才为true；
-      · 不要因形式相似判true；不要因未化简判false；
-      · 含任意常数C（不定积分）时，把P-G是否为常数视作等价；
-      · 域不同（如一者带绝对值、一者不带）应判false并说明。
+  user_template: "你是数学等价性裁判，只回答数学等价问题。\n题目背景: {question}\n答案类型: {answer_type}\n候选答案\
+    \ P: {pred}\n标准答案 G: {gold}\n数值采样线索: {pass_rate}/{total} 点近似相等，符号化简未能归零\n\n只输出JSON（无Markdown）：\n\
+    {\"equivalent\": true | false, \"reason\": \"≤2句中文说明（指出关键恒等式或反例）\"}\n\n判定准则：\n\
+    \  · 仅当P、G在所有合法定义域上恒等才为true；\n  · 不要因形式相似判true；不要因未化简判false；\n  · 含任意常数C（不定积分）时，把P-G是否为常数视作等价；\n\
+    \  · 域不同（如一者带绝对值、一者不带）应判false并说明。\n"

@@ -24,32 +24,31 @@ class PlannerAgent(BaseAgent):
         failed_strategies: Optional[list[Strategy]] = None,
     ) -> list[Strategy]:
         system = get("planner", "system")
+        answer_type = getattr(problem, "answer_type", None) or "expression"
+        variable = getattr(problem, "variable", None) or "x"
 
         if failed_strategies:
             failed_str = "; ".join(s.name for s in failed_strategies)
             user = format_prompt("planner", "replan_template",
                                  question=problem.question,
-                                 variable=problem.variable,
+                                 answer_type=answer_type,
+                                 variable=variable,
                                  K=K,
                                  failed_strategies=failed_str)
         else:
             user = format_prompt("planner", "user_template",
                                  question=problem.question,
-                                 variable=problem.variable,
+                                 answer_type=answer_type,
+                                 variable=variable,
                                  K=K)
 
-        raw = await self._call(system, user, json_mode=True)
+        raw = await self._call(system, user, json_mode=True, agent_name="planner")
         strategies = self._parse(raw, K)
 
-        # diversity check + one retry if too similar
         if len(strategies) >= 2 and self._too_similar(strategies):
             names = ", ".join(s.name for s in strategies)
-            retry_user = (
-                f"以下方法过于相似：[{names}]。\n"
-                f"题目: {problem.question}\n主变量: {problem.variable}\n"
-                f"请用与之**完全不同**的工具/视角再生成 {K} 条策略。"
-            )
-            raw2 = await self._call(system, retry_user, json_mode=True)
+            retry_user = f"retry: too similar [{names}]. generate {K} different strategies for {problem.question}"
+            raw2 = await self._call(system, retry_user, json_mode=True, agent_name="planner")
             strategies2 = self._parse(raw2, K)
             if len(strategies2) > 0:
                 strategies = strategies2
@@ -67,17 +66,15 @@ class PlannerAgent(BaseAgent):
                 data = json.loads(m.group(0))
             except Exception:
                 return self._fallback(K)
-
         items = data.get("strategies", [])
         if not isinstance(items, list):
             return self._fallback(K)
-
         strategies = []
         for i, item in enumerate(items):
             try:
                 strategies.append(Strategy(
                     strategy_id=item.get("strategy_id", f"s{i+1}"),
-                    name=str(item.get("name", f"方法{i+1}")),
+                    name=str(item.get("name", f"method{i+1}")),
                     rationale=str(item.get("rationale", "")),
                     steps_outline=[str(s) for s in item.get("steps_outline", [])],
                 ))
@@ -88,24 +85,22 @@ class PlannerAgent(BaseAgent):
     def _fallback(self, K: int) -> list[Strategy]:
         return [Strategy(
             strategy_id="s1",
-            name="直接计算",
-            rationale="使用基本公式或 SymPy 直接求解",
-            steps_outline=["解析题目", "调用 SymPy 工具", "化简结果", "验证"],
+            name="direct_calculation",
+            rationale="use basic formulas or SymPy",
+            steps_outline=["parse", "call_tool", "simplify", "verify"],
         )]
 
     def _too_similar(self, strategies: list[Strategy]) -> bool:
-        """Rough keyword-based similarity check."""
         def keywords(s: Strategy) -> set[str]:
             text = s.name + " " + s.rationale + " ".join(s.steps_outline)
-            return set(re.findall(r"[一-龥a-zA-Z]+", text.lower()))
-
+            return set(re.findall(r"[a-zA-Z]+", text.lower()))
         kw_sets = [keywords(s) for s in strategies]
         for i in range(len(kw_sets)):
             for j in range(i + 1, len(kw_sets)):
                 a, b = kw_sets[i], kw_sets[j]
                 if not a or not b:
                     continue
-                iou = len(a & b) / len(a | b)
+                iou = len(a & b) / len(a | b) if (a | b) else 0
                 if iou > 0.7:
                     return True
         return False

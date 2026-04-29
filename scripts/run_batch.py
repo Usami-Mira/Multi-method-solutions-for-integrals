@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -16,6 +17,18 @@ import yaml
 from dotenv import load_dotenv  # type: ignore[import]
 
 load_dotenv()
+
+
+def _sanitize_run_id(s: str) -> str:
+    """Remove/replace characters invalid for Windows filenames."""
+    # Replace invalid chars: < > : " / \ | ? *
+    s = re.sub(r'[<>:"/\\|?*{}\[\] ,]', '_', s)
+    # Collapse multiple underscores
+    s = re.sub(r'_+', '_', s)
+    # Strip leading/trailing underscores and dots
+    s = s.strip('_.')
+    # Limit length
+    return s[:100] if len(s) > 100 else s
 
 
 def build_pipeline(cfg: dict, model_cfg: dict, run_id: str):
@@ -48,6 +61,7 @@ def build_pipeline(cfg: dict, model_cfg: dict, run_id: str):
         llm_client=client,
         n_samples=cfg["verifier"]["n_samples"],
         llm_for_unsure=cfg["verifier"]["llm_for_unsure"],
+        logger=logger,
     )
     evaluator = EvaluatorAgent(client=client, verifier=verifier, logger=logger)
 
@@ -80,21 +94,36 @@ def load_resume_ids(log_dir: str, run_id: str) -> set[str]:
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--parquet", required=True)
-    parser.add_argument("--K", type=int, default=None)
+    parser.add_argument("--K", type=int, default=3)
     parser.add_argument("--max-rows", type=int, default=None)
-    parser.add_argument("--run-id", default=None)
-    parser.add_argument("--config", default="configs/config.yaml")
-    parser.add_argument("--model-config", default="configs/model.yaml")
+    parser.add_argument("--run-id", type=str, default=None)
+    parser.add_argument("--config", type=str, default="configs/config.yaml")
+    parser.add_argument("--model-config", type=str, default="configs/model.yaml")
     args = parser.parse_args()
 
-    cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
-    model_cfg = yaml.safe_load(Path(args.model_config).read_text(encoding="utf-8"))
+    with open(args.config, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    with open(args.model_config, "r", encoding="utf-8") as f:
+        model_cfg = yaml.safe_load(f)
 
     if args.K:
         cfg["run"]["K"] = args.K
-
-    from calc_solver.utils.ids import make_run_id
-    run_id = args.run_id or make_run_id()
+    
+    run_id = args.run_id
+    if not run_id:
+        run_id = cfg["paths"].get("default_run_id")
+    if not run_id:
+        stem = Path(args.parquet).stem
+        # Generate a safe, readable config summary
+        cfg_parts = [f"K{cfg['run'].get('K', 3)}"]
+        if cfg['run'].get('max_retries_per_strategy'):
+            cfg_parts.append(f"r{cfg['run']['max_retries_per_strategy']}")
+        cfg_str = '-'.join(cfg_parts)
+        run_id = f"{stem}-{cfg_str}"
+    
+    # Sanitize for Windows filesystem
+    run_id = _sanitize_run_id(run_id)
+    
     print(f"Run ID: {run_id}")
 
     from calc_solver.data.loader import load_parquet
@@ -115,10 +144,13 @@ async def main():
 
     correct = sum(1 for r in results if r.is_correct)
     total = len([r for r in results if r.notes != "skipped_resume"])
-    print(f"\nAccuracy: {correct}/{total} = {correct/total:.1%}" if total else "No results")
+    if total:
+        print(f"\nAccuracy: {correct}/{total} = {correct/total:.1%}")
+    else:
+        print("No results")
     print(f"Logs: logs/{run_id}/")
 
-    from scripts.analyze_results import summarize
+    from analyze_results import summarize
     summarize(f"logs/{run_id}")
 
 

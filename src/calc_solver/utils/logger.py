@@ -32,6 +32,13 @@ class RunLogger:
         self._llm_f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
         self._llm_f.flush()
 
+    def log_llm_verbose(self, record: dict) -> None:
+        import os
+        if os.environ.get("LOG_LLM_VERBOSE", "").lower() in ("1", "true", "yes"):
+            path = self.run_dir / "llm_verbose.jsonl"
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+
     def log_trace(self, problem_id: str, data: dict) -> None:
         path = self.run_dir / "traces" / f"{problem_id}.json"
         with open(path, "w", encoding="utf-8") as f:

@@ -29,6 +29,7 @@ class Pipeline:
         max_outer_loops: int = 2,
         problem_concurrency: int = 4,
         builder_concurrency_per_problem: int = 3,
+        max_retries_per_strategy: int = 2,
         enable_replan_on_fail: bool = True,
         logger: Optional[RunLogger] = None,
     ):
@@ -39,20 +40,16 @@ class Pipeline:
         self.max_outer_loops = max_outer_loops
         self.problem_sem = asyncio.Semaphore(problem_concurrency)
         self.builder_sem = asyncio.Semaphore(problem_concurrency * builder_concurrency_per_problem)
+        self.max_retries_per_strategy = max_retries_per_strategy
         self.enable_replan_on_fail = enable_replan_on_fail
         self.logger = logger
 
     async def solve_one(self, problem: Problem) -> EvalResult:
-        """
-        Outer loop: Planner → K Builders (parallel) → Evaluator.
-        If Evaluator returns is_correct=False, replan and retry up to max_outer_loops times.
-        """
         all_solutions: list[Solution] = []
         failed_strategies: list[Strategy] = []
         result: Optional[EvalResult] = None
 
         for loop_idx in range(self.max_outer_loops):
-            # Plan
             try:
                 strategies = await self.planner.plan(
                     problem,
@@ -67,35 +64,113 @@ class Pipeline:
             if not strategies:
                 break
 
-            # Build (parallel)
-            async def _build(s: Strategy) -> Solution:
-                async with self.builder_sem:
+            async def _solve_strategy(strategy: Strategy) -> Optional[Solution]:
+                for retry_idx in range(self.max_retries_per_strategy):
                     try:
-                        return await self.builder.build(problem, s)
+                        async with self.builder_sem:
+                            sol = await self.builder.build(problem, strategy)
+                        if self.logger and sol:
+                            self.logger.info("builder_output",
+                                problem_id=problem.problem_id,
+                                strategy_id=strategy.strategy_id,
+                                retry=retry_idx + 1,
+                                final_answer=(sol.final_answer[:200] if sol.final_answer else None),
+                                final_answer_sympy=(sol.final_answer_sympy[:200] if sol.final_answer_sympy else None),
+                                self_check_passed=sol.self_check_passed,
+                                error=(sol.error[:100] if sol.error else None))
+                        passed = await self.evaluator.evaluate_single(problem, sol)
+                        if self.logger:
+                            self.logger.info("evaluator_result",
+                                problem_id=problem.problem_id,
+                                strategy_id=strategy.strategy_id,
+                                retry=retry_idx + 1,
+                                pred=(sol.final_answer[:150] if sol.final_answer else None),
+                                gold=problem.gold_answer[:150],
+                                passed=passed)
+                        if passed:
+                            if self.logger:
+                                self.logger.info(
+                                    "strategy_success",
+                                    problem_id=problem.problem_id,
+                                    strategy_id=strategy.strategy_id,
+                                    retry=retry_idx + 1,
+                                    loop=loop_idx + 1,
+                                )
+                            return sol
+                        if self.logger:
+                            self.logger.info(
+                                "strategy_retry",
+                                problem_id=problem.problem_id,
+                                strategy_id=strategy.strategy_id,
+                                retry=retry_idx + 1,
+                                max_retries=self.max_retries_per_strategy,
+                                reason="evaluation_failed",
+                            )
                     except Exception as exc:
-                        return _failed_solution(s, exc)
+                        if self.logger:
+                            self.logger.warning(
+                                "strategy_build_error",
+                                problem_id=problem.problem_id,
+                                strategy_id=strategy.strategy_id,
+                                retry=retry_idx + 1,
+                                error=str(exc),
+                            )
+                        continue
+                if self.logger:
+                    self.logger.warning(
+                        "strategy_exhausted",
+                        problem_id=problem.problem_id,
+                        strategy_id=strategy.strategy_id,
+                        total_retries=self.max_retries_per_strategy,
+                    )
+                return None
 
-            new_solutions = await asyncio.gather(*[_build(s) for s in strategies])
-            all_solutions.extend(new_solutions)
+            successful_solutions = await asyncio.gather(*[
+                _solve_strategy(s) for s in strategies
+            ])
+            successful_solutions = [s for s in successful_solutions if s is not None]
+            all_solutions.extend(successful_solutions)
 
-            # Evaluate
-            result = await self.evaluator.evaluate(problem, list(all_solutions))
-            result.loop_count = loop_idx + 1
-
-            if self.logger:
-                self.logger.info(
-                    "eval_loop",
-                    problem_id=problem.problem_id,
-                    loop=loop_idx + 1,
-                    is_correct=result.is_correct,
+            if successful_solutions:
+                best = min(
+                    successful_solutions,
+                    key=lambda s: (not s.self_check_passed, len(s.steps))
                 )
-
-            if result.is_correct:
+                vr = self.evaluator.verifier.is_equivalent(
+                    best.final_answer or "", problem.gold_answer,
+                    var=problem.variable,
+                    answer_type=problem.answer_type,
+                    question=problem.question
+                )
+                confidence = min(vr.confidence * (0.6 + 0.1 * len(successful_solutions)), 1.0)
+                result = EvalResult(
+                    problem_id=problem.problem_id,
+                    chosen_strategy_id=best.strategy_id,
+                    final_answer=best.final_answer,
+                    is_correct=True,
+                    confidence=confidence,
+                    method_agreement=len(successful_solutions),
+                    candidates=successful_solutions,
+                )
+                result.loop_count = loop_idx + 1
+                if self.logger:
+                    self.logger.info(
+                        "eval_success",
+                        problem_id=problem.problem_id,
+                        loop=loop_idx + 1,
+                        successful_strategies=len(successful_solutions),
+                    )
                 break
 
-            # Not correct: collect failed strategies for replan hint
             if self.enable_replan_on_fail:
                 failed_strategies.extend(strategies)
+                if self.logger:
+                    self.logger.info(
+                        "all_strategies_failed",
+                        problem_id=problem.problem_id,
+                        loop=loop_idx + 1,
+                        failed_count=len(strategies),
+                    )
 
         if result is None:
             result = EvalResult(
@@ -104,7 +179,7 @@ class Pipeline:
                 confidence=0.0,
                 method_agreement=0,
                 candidates=all_solutions,
-                notes="pipeline: no result produced",
+                notes="pipeline: no strategy succeeded after all loops",
             )
 
         if self.logger:
@@ -157,3 +232,4 @@ class Pipeline:
             results = list(await asyncio.gather(*[_wrap(p) for p in problems]))
 
         return results
+

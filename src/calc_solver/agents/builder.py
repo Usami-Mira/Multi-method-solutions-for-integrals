@@ -74,6 +74,7 @@ class BuilderAgent(BaseAgent):
         system = get("builder", "system")
         steps_outline = "\n".join(f"{i+1}. {s}" for i, s in enumerate(strategy.steps_outline))
 
+        first_step = strategy.steps_outline[0] if strategy.steps_outline else ""
         user_init = format_prompt(
             "builder", "user_template",
             question=problem.question,
@@ -81,11 +82,12 @@ class BuilderAgent(BaseAgent):
             strategy_name=strategy.name,
             strategy_rationale=strategy.rationale,
             steps_outline=steps_outline,
+            first_step=first_step,
         )
         if prior_error:
             hint = format_prompt("builder", "retry_hint",
                                  reason=prior_error,
-                                 weak_step="上一次")
+                                 weak_step="???")
             user_init = user_init + "\n\n" + hint
 
         messages: list[dict] = [
@@ -102,13 +104,13 @@ class BuilderAgent(BaseAgent):
             if step_no >= self.max_steps:
                 messages.append({
                     "role": "user",
-                    "content": "步数已达上限。请立即输出 action=finish 并给出当前最优答案。"
+                    "content": "???????????? action=finish ??????????"
                 })
 
             # Rolling summary: if conversation grows too long, compress middle history
             messages = self._compact_messages(messages, steps)
 
-            raw = await self._call_messages(messages, json_mode=True, temperature=temperature)
+            raw = await self._call_messages(messages, json_mode=True, temperature=temperature, agent_name="builder")
             action_dict, parse_err = self._parse_action(raw)
 
             if parse_err:
@@ -118,7 +120,7 @@ class BuilderAgent(BaseAgent):
                 messages.append({"role": "assistant", "content": raw})
                 messages.append({
                     "role": "user",
-                    "content": f"JSON解析失败：{parse_err}。请只返回合法 JSON 对象，不要任何额外文字。"
+                    "content": f"JSON?????{parse_err}??????? JSON ????????????"
                 })
                 continue
 
@@ -156,15 +158,15 @@ class BuilderAgent(BaseAgent):
                                              result=tool_res["result"])
                 else:
                     feedback = (
-                        f"工具 {tool_name} 失败：{tool_res['error']}。\n"
-                        "请修正参数或换用其他工具，然后继续。"
+                        f"?? {tool_name} ???{tool_res['error']}?\n"
+                        "??????????????????"
                     )
                 messages.append({"role": "user", "content": feedback})
 
             else:  # think
                 steps.append(step)
                 messages.append({"role": "assistant", "content": raw})
-                messages.append({"role": "user", "content": "请继续下一步。"})
+                messages.append({"role": "user", "content": "???????"})
 
         return final_result, steps, "max_steps_exceeded"
 
@@ -181,10 +183,10 @@ class BuilderAgent(BaseAgent):
         n_summarised_steps = max(0, len(steps) - keep_recent // 2)
         digest_lines = []
         for s in steps[:n_summarised_steps]:
-            tc = s.tool_call.get("name") if s.tool_call else "—"
+            tc = s.tool_call.get("name") if s.tool_call else "?"
             tr = (s.tool_result or "")[:80]
             digest_lines.append(f"step{s.step_no}: tool={tc} state={s.state[:40] if s.state else ''} result={tr}")
-        digest = "已执行步骤摘要：\n" + "\n".join(digest_lines) if digest_lines else ""
+        digest = "????????\n" + "\n".join(digest_lines) if digest_lines else ""
         if digest:
             head = head + [{"role": "user", "content": digest}]
         return head + tail
@@ -207,8 +209,12 @@ class BuilderAgent(BaseAgent):
         return {}, f"Cannot parse JSON from: {raw[:100]}"
 
     def _self_check(self, result: dict, problem: Problem) -> tuple[bool, str]:
-        """Reverse-verify the final answer using SymPy."""
-        from calc_solver.tools.sympy_tool import differentiate, integrate_indef
+        """Reverse-verify the final answer using SymPy with robust equivalence checking."""
+        from calc_solver.tools.sympy_tool import differentiate, simplify
+        from calc_solver.tools.latex_parser import best_parse
+        from calc_solver.tools.verifier import Verifier
+        import sympy as sp
+        
         final = result.get("final_answer", "") or result.get("final_answer_sympy", "")
         if not final:
             return False, "empty_answer"
@@ -220,17 +226,54 @@ class BuilderAgent(BaseAgent):
             if tag.get("have_indefinite"):
                 # d/dx(answer) should equal the integrand
                 d_res = differentiate(final, var)
-                if d_res["ok"]:
-                    from calc_solver.tools.verifier import Verifier
-                    v = Verifier()
-                    integrand = _extract_integrand(problem.question, var)
-                    if integrand:
-                        vr = v.is_equivalent(d_res["result"], integrand, var=var)
-                        if vr.is_eq:
+                if not d_res["ok"]:
+                    return False, f"differentiate_failed: {d_res.get('error')}"
+                
+                integrand = _extract_integrand(problem.question, var)
+                if not integrand:
+                    return True, ""  # Can't extract integrand, give benefit of doubt
+                
+                # Method 1: Use Verifier with full pipeline (L1-L5)
+                v = Verifier(llm_client=self.client if hasattr(self, 'client') else None)
+                vr = v.is_equivalent(d_res["result"], integrand, var=var)
+                if vr.is_eq:
+                    return True, ""
+                
+                # Method 2: Fallback - direct symbolic simplification of difference
+                # Parse both to SymPy expressions and simplify their difference
+                pred_expr = best_parse(d_res["result"], var)
+                gold_expr = best_parse(integrand, var)
+                if pred_expr is not None and gold_expr is not None:
+                    diff = sp.simplify(pred_expr - gold_expr)
+                    # Try multiple simplification strategies
+                    for simp_fn in [sp.simplify, sp.trigsimp, sp.expand_trig, sp.cancel]:
+                        try:
+                            if simp_fn(diff) == 0:
+                                return True, ""
+                        except Exception:
+                            continue
+                    # Final check: numeric evaluation at random points
+                    try:
+                        x = sp.Symbol(var)
+                        import numpy as np
+                        test_pts = [0.1, 0.5, 1.0, 2.0, -0.5, -1.0]
+                        match_count = 0
+                        for pt in test_pts:
+                            try:
+                                pv = float(pred_expr.subs(x, pt).evalf())
+                                gv = float(gold_expr.subs(x, pt).evalf())
+                                if np.isfinite(pv) and np.isfinite(gv) and abs(pv - gv) < 1e-6:
+                                    match_count += 1
+                            except Exception:
+                                continue
+                        if match_count >= len(test_pts) * 0.8:  # 80% match threshold
                             return True, ""
-                        return False, f"derivative_mismatch: d/dx({final[:30]}) != {integrand[:30]}"
+                    except Exception:
+                        pass
+                
+                return False, f"derivative_mismatch: d/dx({final[:30]}) != {integrand[:30]}"
+            
             # For other types, just check the answer is parseable
-            from calc_solver.tools.latex_parser import best_parse
             if best_parse(final, var) is not None:
                 return True, ""
             return False, "answer_not_parseable"
@@ -238,9 +281,3 @@ class BuilderAgent(BaseAgent):
             return True, ""  # give benefit of doubt if self-check errors
 
 
-def _extract_integrand(question: str, var: str) -> Optional[str]:
-    """Try to extract the integrand from a question about ∫ f(x) dx."""
-    m = re.search(r"\\int\s*(.+?)\s*(?:d\s*" + re.escape(var) + r"|dx|dt|du)", question)
-    if m:
-        return m.group(1).strip()
-    return None
