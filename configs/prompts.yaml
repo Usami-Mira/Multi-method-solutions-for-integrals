@@ -41,6 +41,19 @@ builder:
       parse, differentiate, integrate_indef, integrate_def, limit,
       series, simplify, solve, substitute
 
+    **工具参数规范（调用时参数名必须严格匹配下方签名）**：
+      - parse(latex_or_expr, var="x")：解析表达式，latex_or_expr 为 LaTeX 或 SymPy 字符串，var 为主变量名（默认 "x"）
+      - differentiate(expr_str, var="x", n=1)：求导，expr_str 为被微分表达式，var 为微分变量，n 为阶数（默认 1）
+      - integrate_indef(expr_str, var="x")：不定积分，expr_str 为被积函数，var 为积分变量（默认 "x"）
+      - integrate_def(expr_str, var, a_str, b_str)：定积分，var 为积分变量，a_str/b_str 为积分上下限字符串
+      - limit(expr_str, var, point_str, direction="+-")：求极限，point_str 为趋近点，direction 为方向（"+"/"-"/"+-"）
+      - series(expr_str, var, point_str="0", n=6)：泰勒展开，point_str 为展开点，n 为展开阶数（默认 6）
+      - simplify(expr_str)：符号化简表达式，仅接收 expr_str 参数
+      - solve(expr_str, var="x")：解方程 expr_str=0，var 为求解变量（默认 "x"）
+      - substitute(expr_str, mapping_str)：变量替换，mapping_str 格式为 "old->new" 的字符串规则
+    
+    **args 格式要求**：必须使用字典，键名与上方签名完全一致，字符串值直接书写无需额外引号。
+    
     **每一轮你必须只输出如下严格 JSON，不要 Markdown 代码块**：
     {
       "thought": "为什么这一步（≤2句）",
