@@ -25,6 +25,7 @@ class BaseAgent:
         user: str,
         json_mode: bool = False,
         temperature: Optional[float] = None,
+        agent_name: str = "unknown",
     ) -> str:
         messages = [
             {"role": "system", "content": system},
@@ -34,6 +35,7 @@ class BaseAgent:
             messages,
             temperature=temperature if temperature is not None else self.temperature,
             json_mode=json_mode,
+            agent_name=agent_name,
         )
 
     async def _call_messages(
@@ -41,9 +43,11 @@ class BaseAgent:
         messages: list[dict],
         json_mode: bool = False,
         temperature: Optional[float] = None,
+        agent_name: str = "unknown",
     ) -> str:
         return await self.client.chat(
             messages,
             temperature=temperature if temperature is not None else self.temperature,
             json_mode=json_mode,
+            agent_name=agent_name,
         )

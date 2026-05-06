@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 from typing import Optional
@@ -58,7 +58,7 @@ class Pipeline:
                 )
             except Exception as e:
                 if self.logger:
-                    self.logger.error("planner_failed", problem_id=problem.problem_id, error=str(e))
+                    self.logger.error("planner_failed", problem_id=problem.problem_id, error=str(e), exc_info=True)
                 break
 
             if not strategies:
@@ -232,4 +232,5 @@ class Pipeline:
             results = list(await asyncio.gather(*[_wrap(p) for p in problems]))
 
         return results
+
 

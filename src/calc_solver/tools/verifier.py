@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import re
 from typing import TYPE_CHECKING, Literal, Optional
@@ -196,7 +196,10 @@ class Verifier:
             return VerifyResult(is_eq=False, level_used="fail", confidence=0.0, evidence="no_llm_client")
         try:
             from calc_solver.llm.prompts import get, format_prompt
-            system = get("equivalence_judge", "system") if "system" in get("equivalence_judge") else ""
+            try:
+                system = get("equivalence_judge", "system")
+            except (KeyError, TypeError):
+                system = ""
             user = format_prompt(
                 "equivalence_judge", "user_template",
                 question=question,
@@ -208,12 +211,23 @@ class Verifier:
             )
             raw = self.llm_client.chat(
                 [{"role": "system", "content": system}, {"role": "user", "content": user}],
-                temperature=0.0, json_mode=True, max_retries=1
+                temperature=0.0, json_mode=True, max_retries=1, agent_name="verifier"
             )
             import json
-            data = json.loads(raw)
-            is_eq = data.get("equivalent", False)
-            reason = data.get("reason", "")[:100]
+            # Robust JSON parsing for LLM response
+            try:
+                data = json.loads(raw)
+                if not isinstance(data, dict):
+                    # Try to extract dict from nested structure
+                    if isinstance(data, list) and len(data) > 0:
+                        data = data[0] if isinstance(data[0], dict) else {}
+                    else:
+                        data = {}
+            except (json.JSONDecodeError, TypeError):
+                data = {}
+            # Safe key access with fallback
+            is_eq = data.get("equivalent", data.get("is_eq", data.get("equal", False)))
+            reason = str(data.get("reason", data.get("explanation", "")))[:100]
             if self.logger:
                 self.logger.info("verifier_L5_success", is_eq=is_eq, reason=reason)
             return VerifyResult(is_eq=is_eq, level_used="L5", confidence=0.6, evidence=f"llm_judge: {reason}")
@@ -221,3 +235,8 @@ class Verifier:
             if self.logger:
                 self.logger.info("verifier_L5_error", raw_response=(raw if 'raw' in locals() else None)[:200] if 'raw' in locals() else None, error=str(e))
             return VerifyResult(is_eq=False, level_used="fail", confidence=0.0, evidence=f"L5_error: {type(e).__name__}: {str(e)[:50]}")
+
+
+
+
+

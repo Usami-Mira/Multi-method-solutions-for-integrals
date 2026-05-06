@@ -114,8 +114,6 @@ python scripts/inspect_parquet.py data/raw/question-v1.parquet
 
 ### Step 2 — 加载 + 过滤
 
-> **Note**: If calc_solver module not found, run pip install -e . first
-
 ```bash
 python -c "from calc_solver.data.loader import load_parquet; load_parquet('data/raw/question-v1.parquet')"
 ```
